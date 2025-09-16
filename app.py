@@ -91,6 +91,58 @@ def mission_rating(go, E_need, E_avail, health_score):
     if eff < 0.9 and health_score > 60: return "C ⚠️"
     return "D ❗"
 
+# ── Higher-fidelity energy model (keeps original intact) ─────────────────────
+def energy_wh_better(
+    distance_m: float,
+    V_ms: float,
+    mass_kg: float,
+    hover_to_s: float,
+    hover_ldg_s: float,
+    rho: float = 1.225,
+    S_ref: float = 3.5,
+    CD0: float = 0.08,
+    AR: float = 8.0,
+    e: float = 0.8,
+    A_disk_total: float = 20.0,
+    eta_prop: float = 0.75,
+    eta_elec: float = 0.93,
+    loiter_min: float = 0.0,
+    loiter_mode: str = "hover"  # "hover" or "cruise"
+):
+    """
+    Higher-fidelity toy model (still lightweight):
+    - Cruise power = parasite + induced (air power), then / efficiencies to get electrical input
+    - Hover power from momentum theory using total rotor disk area
+    - Separate TO/Landing hover times + optional loiter reserve (hover by default)
+    """
+    g = 9.80665
+    W = mass_kg * g
+
+    # Hover power (air) via momentum theory
+    P_hover_air = (W ** 1.5) / max(1e-6, (2.0 * rho * A_disk_total) ** 0.5)
+    P_hover_elec = P_hover_air / max(1e-6, (eta_prop * eta_elec))
+    E_hover_Wh = P_hover_elec * (hover_to_s + hover_ldg_s) / 3600.0
+
+    # Cruise power (air): parasite + induced
+    P_par_air = 0.5 * rho * (V_ms ** 3) * S_ref * CD0
+    k = 1.0 / max(1e-6, (math.pi * e * AR))
+    P_ind_air = (2.0 * k * (W ** 2)) / max(1e-6, (rho * V_ms * S_ref))
+    P_cruise_air = P_par_air + P_ind_air
+    P_cruise_elec = P_cruise_air / max(1e-6, (eta_prop * eta_elec))
+
+    # Cruise time & energy
+    t_cruise_s = distance_m / max(1e-6, V_ms)
+    E_cruise_Wh = P_cruise_elec * t_cruise_s / 3600.0
+
+    # Loiter reserve
+    if loiter_mode == "cruise":
+        E_loiter_Wh = P_cruise_elec * (loiter_min * 60.0) / 3600.0
+    else:
+        E_loiter_Wh = P_hover_elec * (loiter_min * 60.0) / 3600.0
+
+    E_total_Wh = E_hover_Wh + E_cruise_Wh + E_loiter_Wh
+    return E_total_Wh, P_hover_elec, P_cruise_elec, t_cruise_s, E_hover_Wh, E_cruise_Wh, E_loiter_Wh
+
 # ─────────────────────────────────────────────────────────
 # Lightweight event logger (exportable)
 # ─────────────────────────────────────────────────────────
@@ -194,11 +246,56 @@ with tab1:
 
     path=astar(grid,start,goal)
     distance=((len(path)-1) if path else 0)*scale_m
-    E_need,P_h,P_c,t_c=energy_wh(distance,cruise,mass,hover_s)
-    reserve=(reserve_pct/100.0)*batt
+
+    # ── Physics fidelity selector ─────────────────────────
+    fidelity = st.selectbox(
+        "Physics fidelity",
+        ["Simple (demo)", "Better (induced + parasite, efficiencies)"],
+        index=0,
+        key="plan_fidelity"
+    )
+
+    if fidelity.startswith("Better"):
+        with st.expander("Better physics settings", expanded=False):
+            cA = st.columns(4)
+            hover_to_s   = cA[0].number_input("Takeoff hover (s)", 0.0, 600.0, 45.0, 5.0, key="plan_to_hover")
+            hover_ldg_s  = cA[1].number_input("Landing hover (s)", 0.0, 600.0, 45.0, 5.0, key="plan_ldg_hover")
+            loiter_min   = cA[2].number_input("Loiter reserve (min)", 0.0, 30.0, 3.0, 1.0, key="plan_loiter_min")
+            loiter_mode  = cA[3].selectbox("Loiter mode", ["hover", "cruise"], index=0, key="plan_loiter_mode")
+
+            cB = st.columns(4)
+            rho        = cB[0].number_input("Air density ρ (kg/m³)", 0.8, 1.6, 1.225, 0.005, key="plan_rho")
+            S_ref      = cB[1].number_input("Ref area S (m²)", 0.5, 20.0, 3.5, 0.1, key="plan_S")
+            CD0        = cB[2].number_input("CD₀ (parasite)", 0.02, 0.30, 0.08, 0.005, key="plan_CD0")
+            A_disk_tot = cB[3].number_input("Rotor disk area ΣA (m²)", 2.0, 150.0, 20.0, 0.5, key="plan_Adisk")
+
+            cC = st.columns(4)
+            AR    = cC[0].number_input("Aspect ratio AR", 3.0, 20.0, 8.0, 0.5, key="plan_AR")
+            e     = cC[1].number_input("Oswald e", 0.5, 1.0, 0.80, 0.01, key="plan_e")
+            eta_p = cC[2].number_input("Prop eff ηₚ", 0.5, 0.95, 0.75, 0.01, key="plan_eta_p")
+            eta_e = cC[3].number_input("Elec eff ηₑ", 0.5, 0.99, 0.93, 0.01, key="plan_eta_e")
+
+    # ── Energy & GO check (fidelity-aware) ─────────────────
+    if fidelity.startswith("Better"):
+        E_need, P_h, P_c, t_c, E_hover_Wh, E_cruise_Wh, E_loiter_Wh = energy_wh_better(
+            distance_m=distance,
+            V_ms=cruise,
+            mass_kg=mass,
+            hover_to_s=hover_to_s,
+            hover_ldg_s=hover_ldg_s,
+            rho=rho, S_ref=S_ref, CD0=CD0, AR=AR, e=e,
+            A_disk_total=A_disk_tot,
+            eta_prop=eta_p, eta_elec=eta_e,
+            loiter_min=loiter_min, loiter_mode=loiter_mode
+        )
+        reserve=(reserve_pct/100.0)*batt  # same policy: percent of battery capacity
+    else:
+        E_need,P_h,P_c,t_c=energy_wh(distance,cruise,mass,hover_s)
+        reserve=(reserve_pct/100.0)*batt
+
     go=(path is not None) and (E_need + reserve <= batt)
 
-    # Optional: auto snapshot of planning context
+    # Auto snapshot of planning context (non-intrusive)
     if st.session_state.get("log_auto_flight", True):
         log_event(
             "plan_snapshot",
@@ -206,20 +303,25 @@ with tab1:
             start=start, goal=goal, nfz_count=int(nfz_count),
             distance_m=float(distance), energy_need_Wh=float(E_need),
             battery_Wh=float(batt), reserve_Wh=float(reserve), go=bool(go),
-            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s)
+            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s),
+            fidelity=fidelity
         )
 
+    # Plot
     fig, ax = draw_grid(grid,start,goal,nfz_rects,scale_m, title="City Grid")
     if path:
         xs=[x for y,x in path]; ys=[y for y,x in path]
         ax.plot(xs,ys,linewidth=2)
     st.pyplot(fig)
 
+    # Metrics
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Distance",f"{distance/1000:.2f} km")
     c2.metric("Hover power",f"{P_h/1000:.1f} kW")
     c3.metric("Cruise power",f"{P_c/1000:.1f} kW")
     c4.metric("Cruise time",f"{t_c/60:.1f} min")
+    if fidelity.startswith("Better"):
+        st.caption(f"E_hover={E_hover_Wh:,.0f} Wh | E_cruise={E_cruise_Wh:,.0f} Wh | E_loiter={E_loiter_Wh:,.0f} Wh")
     st.info(f"Need: {E_need:,.0f} Wh | Battery: {batt:,.0f} Wh | Reserve: {reserve:,.0f} Wh")
     st.success("GO ✅") if go else st.error("NO-GO ❌")
 
@@ -231,13 +333,15 @@ with tab1:
             start=start, goal=goal, nfz_count=int(nfz_count),
             distance_m=float(distance), energy_need_Wh=float(E_need),
             battery_Wh=float(batt), reserve_Wh=float(reserve), go=bool(go),
-            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s)
+            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s),
+            fidelity=fidelity
         )
         st.success("Logged plan snapshot.")
 
     sb_health.metric("Health", f"{st.session_state.get('health_now',80.0):.1f} / 100")
     sb_status.write("Status: Planned ✅" if go else "Status: Blocked / Low energy ❌")
 
+    # Playback
     if go and st.button("▶️ Play flight", key="plan_play"):
         placeholder_metric = st.empty()
         placeholder_plot = st.empty()
@@ -256,7 +360,8 @@ with tab1:
                 grid_W=int(grid_W), grid_H=int(grid_H), scale_m=int(scale_m),
                 start=start, goal=goal, nfz_count=int(nfz_count),
                 mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s),
-                reserve_pct=float(reserve_pct)
+                reserve_pct=float(reserve_pct),
+                fidelity=fidelity
             )
 
         for i,(y,x) in enumerate(path):
@@ -279,7 +384,8 @@ with tab1:
                 distance_m=float(((len(path)-1) if path else 0) * scale_m),
                 energy_need_Wh=float(E_need),
                 battery_Wh=float(batt),
-                reserve_Wh=float(reserve)
+                reserve_Wh=float(reserve),
+                fidelity=fidelity
             )
 
         health_now = st.session_state.get("health_now", 80.0)
@@ -290,7 +396,7 @@ with tab1:
 
         # Auto-log: rating
         if st.session_state.get("log_auto_rating", True):
-            log_event("mission_rating", rating=str(rating), health=float(health_now), go=bool(go))
+            log_event("mission_rating", rating=str(rating), health=float(health_now), go=bool(go), fidelity=fidelity)
 
 # ============ 2) Perception Sandbox ============
 with tab2:
