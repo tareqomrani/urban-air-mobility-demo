@@ -1,11 +1,14 @@
 # 🛩️ eVTOL Mini-Lab — Streamlit demo (HUD + animation + normalized health + mobile-friendly)
 # Run: streamlit run app.py
 
-import math, time
+import math, time, json
+from datetime import datetime
+from typing import Tuple, List
+
 import numpy as np
+import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-from typing import Tuple, List
 
 st.set_page_config(page_title="eVTOL Mini-Lab", page_icon="🛩️", layout="wide")
 st.title("🛩️ eVTOL Mini-Lab")
@@ -60,7 +63,7 @@ def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
     E_cruise=P_cruise*t_cruise/3600.0
     return E_hover+E_cruise, P_hover, P_cruise, t_cruise
 
-# ▶ NEW: Normalized health score (moves smoothly 0–100)
+# ▶ Normalized health score (moves smoothly 0–100)
 def compute_health(hours, cycles, max_temp_c, vib_g_rms):
     """
     Normalized 0–100 health score.
@@ -89,6 +92,23 @@ def mission_rating(go, E_need, E_avail, health_score):
     return "D ❗"
 
 # ─────────────────────────────────────────────────────────
+# Lightweight event logger (exportable)
+# ─────────────────────────────────────────────────────────
+st.session_state.setdefault("logs", [])
+
+def log_event(event: str, **fields):
+    st.session_state["logs"].append({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "event": event,
+        **fields
+    })
+
+def logs_dataframe() -> pd.DataFrame:
+    if not st.session_state["logs"]:
+        return pd.DataFrame(columns=["ts", "event"])
+    return pd.DataFrame(st.session_state["logs"])
+
+# ─────────────────────────────────────────────────────────
 # Session + Sidebar HUD
 # ─────────────────────────────────────────────────────────
 st.session_state.setdefault("health_now", 80.0)
@@ -101,6 +121,19 @@ sb_status = st.sidebar.empty()
 sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")
 sb_energy.write("Remaining Energy: —")
 sb_status.write("Status: Ready")
+
+# Logging toggles
+st.sidebar.subheader("Logging")
+st.sidebar.caption("Automatically record planner runs & ratings")
+st.session_state.setdefault("log_auto_flight", True)
+st.session_state.setdefault("log_auto_rating", True)
+
+st.session_state["log_auto_flight"] = st.sidebar.toggle(
+    "Auto-log flight runs", value=st.session_state["log_auto_flight"], key="log_auto_flight_toggle"
+)
+st.session_state["log_auto_rating"] = st.sidebar.toggle(
+    "Auto-log mission rating", value=st.session_state["log_auto_rating"], key="log_auto_rating_toggle"
+)
 
 # Mobile-friendly packing for controls
 compact = st.sidebar.toggle("Compact controls (mobile)", value=True, key="ui_compact")
@@ -165,6 +198,17 @@ with tab1:
     reserve=(reserve_pct/100.0)*batt
     go=(path is not None) and (E_need + reserve <= batt)
 
+    # Optional: auto snapshot of planning context
+    if st.session_state.get("log_auto_flight", True):
+        log_event(
+            "plan_snapshot",
+            grid_W=int(grid_W), grid_H=int(grid_H), scale_m=int(scale_m),
+            start=start, goal=goal, nfz_count=int(nfz_count),
+            distance_m=float(distance), energy_need_Wh=float(E_need),
+            battery_Wh=float(batt), reserve_Wh=float(reserve), go=bool(go),
+            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s)
+        )
+
     fig, ax = draw_grid(grid,start,goal,nfz_rects,scale_m, title="City Grid")
     if path:
         xs=[x for y,x in path]; ys=[y for y,x in path]
@@ -179,6 +223,18 @@ with tab1:
     st.info(f"Need: {E_need:,.0f} Wh | Battery: {batt:,.0f} Wh | Reserve: {reserve:,.0f} Wh")
     st.success("GO ✅") if go else st.error("NO-GO ❌")
 
+    # Manual snapshot button
+    if st.button("📝 Log plan snapshot", key="plan_log"):
+        log_event(
+            "plan_snapshot_manual",
+            grid_W=int(grid_W), grid_H=int(grid_H), scale_m=int(scale_m),
+            start=start, goal=goal, nfz_count=int(nfz_count),
+            distance_m=float(distance), energy_need_Wh=float(E_need),
+            battery_Wh=float(batt), reserve_Wh=float(reserve), go=bool(go),
+            mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s)
+        )
+        st.success("Logged plan snapshot.")
+
     sb_health.metric("Health", f"{st.session_state.get('health_now',80.0):.1f} / 100")
     sb_status.write("Status: Planned ✅" if go else "Status: Blocked / Low energy ❌")
 
@@ -190,6 +246,18 @@ with tab1:
         st.session_state["energy_now"] = energy
         sb_energy.metric("Remaining Energy", f"{energy:,.0f} Wh")
         sb_status.write("Status: In flight ✈️")
+
+        # Auto-log: flight start
+        if st.session_state.get("log_auto_flight", True):
+            log_event(
+                "flight_started",
+                steps=int(steps),
+                energy_start_Wh=float(batt),
+                grid_W=int(grid_W), grid_H=int(grid_H), scale_m=int(scale_m),
+                start=start, goal=goal, nfz_count=int(nfz_count),
+                mass_kg=float(mass), cruise_ms=float(cruise), hover_s=float(hover_s),
+                reserve_pct=float(reserve_pct)
+            )
 
         for i,(y,x) in enumerate(path):
             fig, ax = draw_grid(grid,start,goal,nfz_rects,scale_m, title="Flight Playback")
@@ -203,11 +271,26 @@ with tab1:
             sb_energy.metric("Remaining Energy", f"{energy:,.0f} Wh")
             time.sleep(0.08)
 
+        # Auto-log: flight end
+        if st.session_state.get("log_auto_flight", True):
+            log_event(
+                "flight_completed",
+                energy_end_Wh=float(st.session_state.get("energy_now", 0.0)),
+                distance_m=float(((len(path)-1) if path else 0) * scale_m),
+                energy_need_Wh=float(E_need),
+                battery_Wh=float(batt),
+                reserve_Wh=float(reserve)
+            )
+
         health_now = st.session_state.get("health_now", 80.0)
         rating = mission_rating(go, E_need, batt, health_now)
         st.subheader(f"Mission Rating: {rating}")
         st.caption(f"(Uses current Health score: {health_now:.1f}/100)")
         sb_status.write(f"Status: Completed — Rating {rating}")
+
+        # Auto-log: rating
+        if st.session_state.get("log_auto_rating", True):
+            log_event("mission_rating", rating=str(rating), health=float(health_now), go=bool(go))
 
 # ============ 2) Perception Sandbox ============
 with tab2:
@@ -265,6 +348,17 @@ with tab2:
     c2.metric("Rays with hit", f"{int(np.sum(hits < r_max))}")
     c3.metric("Brake/avoid", "YES" if brake else "NO")
 
+    # Manual log button
+    if st.button("📝 Log perception snapshot", key="perc_log"):
+        log_event(
+            "perception_snapshot",
+            obstacles=int(num_obs), field_m=int(field), lidar_range_m=int(r_max),
+            safety_radius_m=int(safety_radius), rays=int(rays), resolution_m=float(res),
+            seed=int(seed), nearest_m=float(nearest),
+            rays_hit=int(int(np.sum(hits < r_max))), brake=bool(brake)
+        )
+        st.success("Logged perception snapshot.")
+
 # ============ 3) Health Monitor ============
 with tab3:
     st.subheader("Predictive Maintenance (toy)")
@@ -311,6 +405,16 @@ with tab3:
     )
     st.write("• Maintenance window:", "**Soon**" if due else "**Not yet due**")
 
+    # Manual logs
+    if st.button("📝 Log current health", key="hm_log_now"):
+        log_event(
+            "health_now",
+            hours=float(hours), cycles=float(cycles),
+            max_temp_c=float(temp), vib_g_rms=float(vib),
+            score=float(score), due=bool(due), penalty=float(penalty)
+        )
+        st.success("Logged current health.")
+
     st.divider()
     st.subheader("What-if: before next check")
 
@@ -339,3 +443,55 @@ with tab3:
             f"temp>40°C: {min(fut_excess/40,1)*20:.1f}, "
             f"vibration: {min(max(0.0, vib+vib_bias)/2,1)*10:.1f}  |  Total: {fut_penalty:.1f}"
         )
+
+    if st.button("📝 Log projection", key="hm_log_proj"):
+        log_event(
+            "health_projection",
+            add_hours=float(add_hours), add_cycles=float(add_cycles),
+            temp_bias=float(temp_bias), vib_bias=float(vib_bias),
+            projected_score=float(fut_score), projected_due=bool(fut_due),
+            projected_penalty=float(fut_penalty)
+        )
+        st.success("Logged projected health.")
+
+# ─────────────────────────────────────────────────────────
+# 📜 Logs & Export
+# ─────────────────────────────────────────────────────────
+with st.expander("📜 Logs & Export", expanded=False):
+    df = logs_dataframe()
+    st.caption(f"{len(df)} events recorded")
+    if len(df):
+        st.dataframe(df, use_container_width=True, height=240)
+
+        # CSV / JSON strings
+        csv_str = df.to_csv(index=False)
+        json_str = json.dumps(st.session_state["logs"], indent=2)
+
+        # Downloads
+        st.download_button(
+            "⬇️ Download CSV",
+            data=csv_str.encode("utf-8"),
+            file_name=f"evtol_logs_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv",
+            mime="text/csv",
+            key="logs_dl_csv",
+        )
+        st.download_button(
+            "⬇️ Download JSON",
+            data=json_str.encode("utf-8"),
+            file_name=f"evtol_logs_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json",
+            mime="application/json",
+            key="logs_dl_json",
+        )
+
+        # Copy-ready blocks (click the copy icon)
+        st.markdown("**Copy to clipboard → JSON**")
+        st.code(json_str, language="json")
+        st.markdown("**Copy to clipboard → CSV**")
+        st.code(csv_str, language="csv")
+
+        # Clear
+        if st.button("🗑️ Clear all logs", key="logs_clear"):
+            st.session_state["logs"] = []
+            st.rerun()
+    else:
+        st.info("No events yet. Use the snapshot buttons above, or run a flight.")
