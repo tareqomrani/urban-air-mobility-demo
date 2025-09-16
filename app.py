@@ -1,4 +1,4 @@
-# 🛩️ eVTOL Mini-Lab — Streamlit demo (stable keys + mobile-friendly + full perception controls)
+# 🛩️ eVTOL Mini-Lab — Streamlit demo (HUD + animation + normalized health + mobile-friendly)
 # Run: streamlit run app.py
 
 import math, time
@@ -51,6 +51,7 @@ def draw_grid(grid, start, goal, nfz_rects, scale_m=50, title="Grid"):
     return fig, ax
 
 def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
+    # Toy model: hover ~ mass^1.5; cruise ~ V^3 drag
     k_hover=25.0
     P_hover=k_hover*(mass_kg**1.5)
     E_hover=P_hover*hover_s/3600.0
@@ -59,12 +60,25 @@ def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
     E_cruise=P_cruise*t_cruise/3600.0
     return E_hover+E_cruise, P_hover, P_cruise, t_cruise
 
-def compute_health(h, c, t, v):
-    excess=max(0.0,t-40.0)
-    penalty=h*0.8 + c*0.3 + excess*1.2 + v*8.0
-    score=max(0.0, min(100.0, 100.0 - penalty))
-    due=(score < 60.0) or (t > 75.0) or (v > 1.2)
-    return score, penalty, excess, due
+# ▶ NEW: Normalized health score (moves smoothly 0–100)
+def compute_health(hours, cycles, max_temp_c, vib_g_rms):
+    """
+    Normalized 0–100 health score.
+      hours: 0–2000 h
+      cycles: 0–2000
+      temp excess over 40°C: 0–40°C
+      vibration: 0–2.0 gRMS
+    """
+    h_n = min(hours / 2000.0, 1.0)
+    c_n = min(cycles / 2000.0, 1.0)
+    t_excess = max(0.0, max_temp_c - 40.0)
+    t_n = min(t_excess / 40.0, 1.0)
+    v_n = min(vib_g_rms / 2.0, 1.0)
+    w_h, w_c, w_t, w_v = 0.40, 0.30, 0.20, 0.10
+    penalty = (w_h*h_n + w_c*c_n + w_t*t_n + w_v*v_n) * 100.0
+    score = max(0.0, 100.0 - penalty)
+    due = (score < 60.0) or (max_temp_c > 75.0) or (vib_g_rms > 1.2)
+    return score, penalty, t_excess, due
 
 def mission_rating(go, E_need, E_avail, health_score):
     if not go: return "F ❌"
@@ -88,7 +102,7 @@ sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")
 sb_energy.write("Remaining Energy: —")
 sb_status.write("Status: Ready")
 
-# Mobile-friendly control packing
+# Mobile-friendly packing for controls
 compact = st.sidebar.toggle("Compact controls (mobile)", value=True, key="ui_compact")
 
 # ─────────────────────────────────────────────────────────
@@ -101,7 +115,6 @@ with tab1:
     st.subheader("City Hop Planner (with playback ✈️)")
 
     if compact:
-        # stack controls for mobile
         grid_W = st.slider("Grid width",20,60,40,key="plan_w")
         grid_H = st.slider("Grid height",20,60,40,key="plan_h")
         scale_m = st.selectbox("Meters/cell",[25,50,75,100],index=1,key="plan_scale")
@@ -200,7 +213,6 @@ with tab1:
 with tab2:
     st.subheader("Perception Sandbox (toy lidar)")
 
-    # Full set of controls (now includes safety radius, rays, resolution, seed)
     if compact:
         num_obs = st.slider("Obstacles", 2, 25, 8, key="perc_obs")
         field = st.selectbox("Field size (m)", [30, 40, 60], index=1, key="perc_field")
@@ -238,7 +250,6 @@ with tab2:
     nearest = hits.min() if len(hits) else r_max
     brake = nearest < safety_radius
 
-    # Plot with safety circle
     fig, ax = plt.subplots(figsize=(5,5))
     ax.scatter(obs[:,0], obs[:,1], marker="s")
     ax.scatter([vx], [vy], c="red")
@@ -258,35 +269,51 @@ with tab2:
 with tab3:
     st.subheader("Predictive Maintenance (toy)")
 
-    # Unique keys so nothing collides with other tabs
-    if compact:
-        hours = st.number_input("Flight hours", 0.0, 5000.0, 820.0, step=10.0, key="hm_hours")
-        cycles = st.number_input("Charge cycles", 0.0, 6000.0, 950.0, step=10.0, key="hm_cycles")
-        temp   = st.number_input("Max pack temp (°C)", 0.0, 120.0, 68.0, step=1.0, key="hm_temp")
-        vib    = st.number_input("Vibration gRMS", 0.0, 5.0, 0.7, step=0.1, key="hm_vib")
-    else:
-        c = st.columns(4)
-        hours = c[0].number_input("Flight hours", 0.0, 5000.0, 820.0, step=10.0, key="hm_hours")
-        cycles = c[1].number_input("Charge cycles", 0.0, 6000.0, 950.0, step=10.0, key="hm_cycles")
-        temp   = c[2].number_input("Max pack temp (°C)", 0.0, 120.0, 68.0, step=1.0, key="hm_temp")
-        vib    = c[3].number_input("Vibration gRMS", 0.0, 5.0, 0.7, step=0.1, key="hm_vib")
+    # sensible defaults the first time
+    st.session_state.setdefault("hm_hours", 300.0)
+    st.session_state.setdefault("hm_cycles", 250.0)
+    st.session_state.setdefault("hm_temp", 50.0)
+    st.session_state.setdefault("hm_vib", 0.3)
+
+    bcol = st.columns(3)
+    if bcol[0].button("Reset to typical", key="hm_reset"):
+        st.session_state["hm_hours"] = 300.0
+        st.session_state["hm_cycles"] = 250.0
+        st.session_state["hm_temp"]  = 50.0
+        st.session_state["hm_vib"]   = 0.3
+
+    if bcol[1].button("Maintenance: Battery swap", key="hm_bswap"):
+        st.session_state["hm_cycles"] = 0.0
+
+    if bcol[2].button("Maintenance: Service pack", key="hm_service"):
+        st.session_state["hm_hours"] = max(0.0, st.session_state["hm_hours"] - 150.0)
+        st.session_state["hm_temp"]  = max(40.0, st.session_state["hm_temp"]  - 8.0)
+        st.session_state["hm_vib"]   = max(0.0, st.session_state["hm_vib"]   - 0.2)
+
+    c = st.columns(4)
+    hours = c[0].number_input("Flight hours", 0.0, 5000.0, st.session_state["hm_hours"], step=10.0, key="hm_hours")
+    cycles = c[1].number_input("Charge cycles", 0.0, 6000.0, st.session_state["hm_cycles"], step=10.0, key="hm_cycles")
+    temp   = c[2].number_input("Max pack temp (°C)", 0.0, 120.0, st.session_state["hm_temp"], step=1.0, key="hm_temp")
+    vib    = c[3].number_input("Vibration gRMS", 0.0, 5.0, st.session_state["hm_vib"], step=0.1, key="hm_vib")
 
     score, penalty, excess_temp, due = compute_health(hours, cycles, temp, vib)
 
-    # Write to session for Planner + HUD
-    st.session_state["health_now"] = float(score)
+    st.session_state["health_now"] = float(score)  # share to HUD / Planner
     sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")
 
     st.metric("Health score (now)", f"{score:,.1f} / 100")
     st.progress(int(score))
     st.caption(
-        f"Penalty → hours: {hours*0.8:.1f}, cycles: {cycles*0.3:.1f}, "
-        f"temp>40°C: {excess_temp*1.2:.1f}, vib: {vib*8:.1f} | Total: {penalty:.1f}"
+        f"Penalty → hours: {min(hours/2000,1)*40:.1f}, "
+        f"cycles: {min(cycles/2000,1)*30:.1f}, "
+        f"temp>40°C: {min(excess_temp/40,1)*20:.1f}, "
+        f"vibration: {min(vib/2,1)*10:.1f}  |  Total: {penalty:.1f}"
     )
     st.write("• Maintenance window:", "**Soon**" if due else "**Not yet due**")
 
     st.divider()
     st.subheader("What-if: before next check")
+
     w = st.columns(4)
     add_hours  = w[0].slider("Add hours", 0.0, 300.0, 25.0, step=1.0, key="hm_add_hours")
     add_cycles = w[1].slider("Add cycles", 0.0, 1000.0, 60.0, step=5.0, key="hm_add_cycles")
@@ -294,8 +321,12 @@ with tab3:
     vib_bias   = w[3].slider("Vibration change (gRMS)", -0.5, 1.5, 0.2, step=0.1, key="hm_vib_bias")
 
     fut_score, fut_penalty, fut_excess, fut_due = compute_health(
-        hours + add_hours, cycles + add_cycles, temp + temp_bias, max(0.0, vib + vib_bias)
+        hours + add_hours,
+        cycles + add_cycles,
+        temp + temp_bias,
+        max(0.0, vib + vib_bias)
     )
+
     colA, colB = st.columns(2)
     with colA:
         st.metric("Projected score", f"{fut_score:,.1f} / 100", delta=f"{fut_score - score:+.1f}")
@@ -303,6 +334,8 @@ with tab3:
     with colB:
         st.write("• Projected maintenance window:", "**Soon**" if fut_due else "**Not yet due**")
         st.caption(
-            f"Projected → hours: {(hours+add_hours)*0.8:.1f}, cycles: {(cycles+add_cycles)*0.3:.1f}, "
-            f"temp>40°C: {fut_excess*1.2:.1f}, vib: {max(0.0, vib+vib_bias)*8:.1f} | Total: {fut_penalty:.1f}"
+            f"Projected → hours: {min((hours+add_hours)/2000,1)*40:.1f}, "
+            f"cycles: {min((cycles+add_cycles)/2000,1)*30:.1f}, "
+            f"temp>40°C: {min(fut_excess/40,1)*20:.1f}, "
+            f"vibration: {min(max(0.0, vib+vib_bias)/2,1)*10:.1f}  |  Total: {fut_penalty:.1f}"
         )
