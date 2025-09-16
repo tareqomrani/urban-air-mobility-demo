@@ -1,5 +1,4 @@
-# 🛩️ eVTOL Mini-Lab — Streamlit demo (sidebar HUD + health-integrated mission rating)
-# Features: City Hop Planner (+ animation + mission rating), Perception Sandbox, Predictive Maintenance
+# 🛩️ eVTOL Mini-Lab — Streamlit demo (stable keys + mobile-friendly + full perception controls)
 # Run: streamlit run app.py
 
 import math, time
@@ -13,10 +12,8 @@ st.title("🛩️ eVTOL Mini-Lab")
 st.caption("Autonomy • Perception • Predictive Maintenance")
 
 # ─────────────────────────────────────────────────────────
-# Utilities
+# Helpers
 # ─────────────────────────────────────────────────────────
-def clamp(x, lo, hi): return max(lo, min(hi, x))
-
 def astar(grid: np.ndarray, start: Tuple[int,int], goal: Tuple[int,int]):
     H, W = grid.shape
     def h(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
@@ -54,7 +51,6 @@ def draw_grid(grid, start, goal, nfz_rects, scale_m=50, title="Grid"):
     return fig, ax
 
 def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
-    # Toy model: hover ~ mass^1.5; cruise ~ V^3 drag
     k_hover=25.0
     P_hover=k_hover*(mass_kg**1.5)
     E_hover=P_hover*hover_s/3600.0
@@ -79,62 +75,71 @@ def mission_rating(go, E_need, E_avail, health_score):
     return "D ❗"
 
 # ─────────────────────────────────────────────────────────
-# Session defaults + Sidebar HUD
+# Session + Sidebar HUD
 # ─────────────────────────────────────────────────────────
-st.session_state.setdefault("health_now", 80.0)     # live health score from Health tab
-st.session_state.setdefault("energy_now", None)     # remaining energy during playback
+st.session_state.setdefault("health_now", 80.0)
+st.session_state.setdefault("energy_now", None)
 
 st.sidebar.title("HUD")
 sb_health = st.sidebar.empty()
 sb_energy = st.sidebar.empty()
 sb_status = st.sidebar.empty()
-
-# Initial HUD paint
 sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")
-if st.session_state["energy_now"] is not None:
-    sb_energy.metric("Remaining Energy", f"{st.session_state['energy_now']:,.0f} Wh")
-else:
-    sb_energy.write("Remaining Energy: —")
+sb_energy.write("Remaining Energy: —")
 sb_status.write("Status: Ready")
+
+# Mobile-friendly control packing
+compact = st.sidebar.toggle("Compact controls (mobile)", value=True, key="ui_compact")
 
 # ─────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])
 
-# ─────────────────────────────────────────────────────────
-# 1) City Hop Planner (with animation + mission rating using live health)
-# ─────────────────────────────────────────────────────────
+# ============ 1) City Hop Planner ============
 with tab1:
     st.subheader("City Hop Planner (with playback ✈️)")
 
-    cols=st.columns(4)
-    grid_W=cols[0].slider("Grid width",20,60,40)
-    grid_H=cols[1].slider("Grid height",20,60,40)
-    scale_m=cols[2].selectbox("Meters/cell",[25,50,75,100],index=1)
-    reserve_pct=cols[3].slider("Reserve %",0,30,15)
+    if compact:
+        # stack controls for mobile
+        grid_W = st.slider("Grid width",20,60,40,key="plan_w")
+        grid_H = st.slider("Grid height",20,60,40,key="plan_h")
+        scale_m = st.selectbox("Meters/cell",[25,50,75,100],index=1,key="plan_scale")
+        reserve_pct = st.slider("Reserve %",0,30,15,key="plan_reserve")
+    else:
+        c = st.columns(4)
+        grid_W=c[0].slider("Grid width",20,60,40,key="plan_w")
+        grid_H=c[1].slider("Grid height",20,60,40,key="plan_h")
+        scale_m=c[2].selectbox("Meters/cell",[25,50,75,100],index=1,key="plan_scale")
+        reserve_pct=c[3].slider("Reserve %",0,30,15,key="plan_reserve")
 
-    cols=st.columns(4)
-    mass=cols[0].number_input("Mass (kg)",300.0,5000.0,1100.0,step=50.0)
-    cruise=cols[1].number_input("Cruise speed (m/s)",20.0,120.0,45.0,step=5.0)
-    hover_s=cols[2].number_input("Hover time (s)",0.0,300.0,60.0,step=5.0)
-    batt=cols[3].number_input("Battery (Wh)",50000.0,400000.0,120000.0,step=5000.0)
+    if compact:
+        mass = st.number_input("Mass (kg)",300.0,5000.0,1100.0,step=50.0,key="plan_mass")
+        cruise = st.number_input("Cruise speed (m/s)",20.0,120.0,45.0,step=5.0,key="plan_cruise")
+        hover_s = st.number_input("Hover time (s)",0.0,300.0,60.0,step=5.0,key="plan_hover")
+        batt = st.number_input("Battery (Wh)",50000.0,400000.0,120000.0,step=5000.0,key="plan_batt")
+    else:
+        c = st.columns(4)
+        mass=c[0].number_input("Mass (kg)",300.0,5000.0,1100.0,step=50.0,key="plan_mass")
+        cruise=c[1].number_input("Cruise speed (m/s)",20.0,120.0,45.0,step=5.0,key="plan_cruise")
+        hover_s=c[2].number_input("Hover time (s)",0.0,300.0,60.0,step=5.0,key="plan_hover")
+        batt=c[3].number_input("Battery (Wh)",50000.0,400000.0,120000.0,step=5000.0,key="plan_batt")
 
-    cols=st.columns(4)
-    start=(int(cols[0].number_input("Start Y",0,grid_H-1,5)),
-           int(cols[1].number_input("Start X",0,grid_W-1,5)))
-    goal=(int(cols[2].number_input("Goal Y",0,grid_H-1,grid_H-6)),
-          int(cols[3].number_input("Goal X",0,grid_W-1,grid_W-6)))
+    c = st.columns(4)
+    start=(int(c[0].number_input("Start Y",0,grid_H-1,5,key="plan_sy")),
+           int(c[1].number_input("Start X",0,grid_W-1,5,key="plan_sx")))
+    goal=(int(c[2].number_input("Goal Y",0,grid_H-1,grid_H-6,key="plan_gy")),
+          int(c[3].number_input("Goal X",0,grid_W-1,grid_W-6,key="plan_gx")))
 
     nfz_rects=[]
-    nfz_count=st.slider("No-Fly Zones",0,3,1)
+    nfz_count=st.slider("No-Fly Zones",0,3,1,key="plan_nfz_n")
     for i in range(nfz_count):
         with st.expander(f"NFZ #{i+1}",expanded=True):
             c=st.columns(4)
-            y0=c[0].number_input("y0",0,grid_H-1,10,key=f"y0{i}")
-            x0=c[1].number_input("x0",0,grid_W-1,10,key=f"x0{i}")
-            y1=c[2].number_input("y1",0,grid_H-1,15,key=f"y1{i}")
-            x1=c[3].number_input("x1",0,grid_W-1,15,key=f"x1{i}")
+            y0=c[0].number_input("y0",0,grid_H-1,10,key=f"plan_nfz_y0_{i}")
+            x0=c[1].number_input("x0",0,grid_W-1,10,key=f"plan_nfz_x0_{i}")
+            y1=c[2].number_input("y1",0,grid_H-1,15,key=f"plan_nfz_y1_{i}")
+            x1=c[3].number_input("x1",0,grid_W-1,15,key=f"plan_nfz_x1_{i}")
             y0,y1=sorted([y0,y1]); x0,x1=sorted([x0,x1])
             nfz_rects.append((y0,x0,y1,x1))
 
@@ -147,42 +152,36 @@ with tab1:
     reserve=(reserve_pct/100.0)*batt
     go=(path is not None) and (E_need + reserve <= batt)
 
-    # Plot planned path
     fig, ax = draw_grid(grid,start,goal,nfz_rects,scale_m, title="City Grid")
     if path:
         xs=[x for y,x in path]; ys=[y for y,x in path]
         ax.plot(xs,ys,linewidth=2)
     st.pyplot(fig)
 
-    # Metrics
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Distance",f"{distance/1000:.2f} km")
     c2.metric("Hover power",f"{P_h/1000:.1f} kW")
     c3.metric("Cruise power",f"{P_c/1000:.1f} kW")
     c4.metric("Cruise time",f"{t_c/60:.1f} min")
-
     st.info(f"Need: {E_need:,.0f} Wh | Battery: {batt:,.0f} Wh | Reserve: {reserve:,.0f} Wh")
     st.success("GO ✅") if go else st.error("NO-GO ❌")
 
-    # Sidebar HUD updates
-    sb_health.metric("Health", f"{st.session_state.get('health_now', 80.0):.1f} / 100")
+    sb_health.metric("Health", f"{st.session_state.get('health_now',80.0):.1f} / 100")
     sb_status.write("Status: Planned ✅" if go else "Status: Blocked / Low energy ❌")
 
-    # Animated playback + rating uses live health
-    if go and st.button("▶️ Play flight"):
+    if go and st.button("▶️ Play flight", key="plan_play"):
         placeholder_metric = st.empty()
         placeholder_plot = st.empty()
         energy=batt
+        steps=max(1,len(path))
         st.session_state["energy_now"] = energy
         sb_energy.metric("Remaining Energy", f"{energy:,.0f} Wh")
         sb_status.write("Status: In flight ✈️")
 
-        steps = max(1, len(path))
         for i,(y,x) in enumerate(path):
             fig, ax = draw_grid(grid,start,goal,nfz_rects,scale_m, title="Flight Playback")
             xs=[p[1] for p in path[:i+1]]; ys=[p[0] for p in path[:i+1]]
-            ax.plot(xs,ys,linewidth=2)
-            ax.scatter(x,y,c="red",s=60)
+            ax.plot(xs,ys,linewidth=2); ax.scatter(x,y,c="red",s=60)
             placeholder_plot.pyplot(fig)
 
             energy -= E_need/steps
@@ -194,58 +193,89 @@ with tab1:
         health_now = st.session_state.get("health_now", 80.0)
         rating = mission_rating(go, E_need, batt, health_now)
         st.subheader(f"Mission Rating: {rating}")
-        st.caption(f"(Based on efficiency and current Health score: {health_now:.1f}/100)")
+        st.caption(f"(Uses current Health score: {health_now:.1f}/100)")
         sb_status.write(f"Status: Completed — Rating {rating}")
 
-# ─────────────────────────────────────────────────────────
-# 2) Perception Sandbox
-# ─────────────────────────────────────────────────────────
+# ============ 2) Perception Sandbox ============
 with tab2:
     st.subheader("Perception Sandbox (toy lidar)")
-    cols=st.columns(3)
-    num_obs=cols[0].slider("Obstacles",2,25,8)
-    field=cols[1].selectbox("Field (m)",[30,40,60],index=1)
-    r_max=cols[2].slider("Lidar range (m)",5,40,20)
 
-    seed=st.slider("Random seed",0,999,7); rng=np.random.default_rng(seed)
-    obs=rng.uniform(low=-field/2,high=field/2,size=(num_obs,2))
-    vx,vy=0.0,0.0
+    # Full set of controls (now includes safety radius, rays, resolution, seed)
+    if compact:
+        num_obs = st.slider("Obstacles", 2, 25, 8, key="perc_obs")
+        field = st.selectbox("Field size (m)", [30, 40, 60], index=1, key="perc_field")
+        r_max = st.slider("Lidar range (m)", 5, 40, 20, key="perc_rmax")
+        safety_radius = st.slider("Safety stop radius (m)", 1, 10, 5, key="perc_safe")
+        rays = st.slider("Rays (angles)", 60, 360, 180, step=10, key="perc_rays")
+        res = st.slider("Ray step resolution (m)", 0.1, 1.0, 0.25, step=0.05, key="perc_res")
+        seed = st.slider("Random seed", 0, 999, 7, key="perc_seed")
+    else:
+        c = st.columns(3)
+        num_obs = c[0].slider("Obstacles", 2, 25, 8, key="perc_obs")
+        field   = c[1].selectbox("Field size (m)", [30, 40, 60], index=1, key="perc_field")
+        r_max   = c[2].slider("Lidar range (m)", 5, 40, 20, key="perc_rmax")
+        c = st.columns(4)
+        safety_radius = c[0].slider("Safety stop radius (m)", 1, 10, 5, key="perc_safe")
+        rays          = c[1].slider("Rays (angles)", 60, 360, 180, step=10, key="perc_rays")
+        res           = c[2].slider("Ray step resolution (m)", 0.1, 1.0, 0.25, step=0.05, key="perc_res")
+        seed          = c[3].slider("Random seed", 0, 999, 7, key="perc_seed")
 
-    hits=[]; angs=np.linspace(0,2*np.pi,180,endpoint=False)
-    for th in angs:
-        d=0.0; hit=r_max
-        while d<=r_max:
-            x=vx+d*math.cos(th); y=vy+d*math.sin(th)
-            if np.any(np.hypot(obs[:,0]-x,obs[:,1]-y)<0.6):
-                hit=d; break
-            d+=0.25
+    rng = np.random.default_rng(seed)
+    obs = rng.uniform(low=-field/2, high=field/2, size=(num_obs, 2))
+    vx, vy = 0.0, 0.0
+
+    angles = np.linspace(0, 2*np.pi, rays, endpoint=False)
+    hits = []
+    for th in angles:
+        d = 0.0; hit = r_max
+        while d <= r_max:
+            x = vx + d*math.cos(th); y = vy + d*math.sin(th)
+            if np.any(np.hypot(obs[:,0]-x, obs[:,1]-y) < 0.6):
+                hit = d; break
+            d += res
         hits.append(hit)
-    hits=np.array(hits); nearest=hits.min() if len(hits) else r_max
+    hits = np.array(hits)
+    nearest = hits.min() if len(hits) else r_max
+    brake = nearest < safety_radius
 
-    fig, ax=plt.subplots(figsize=(5,5))
-    ax.scatter(obs[:,0],obs[:,1],marker="s")
-    ax.scatter([vx],[vy],c="red")
-    for d,th in zip(hits,angs):
-        ax.plot([vx,vx+d*math.cos(th)],[vy,vy+d*math.sin(th)],linewidth=0.5)
-    ax.set_aspect("equal","box"); ax.grid(True, alpha=0.2)
+    # Plot with safety circle
+    fig, ax = plt.subplots(figsize=(5,5))
+    ax.scatter(obs[:,0], obs[:,1], marker="s")
+    ax.scatter([vx], [vy], c="red")
+    for d,th in zip(hits, angles):
+        ax.plot([vx, vx + d*math.cos(th)], [vy, vy + d*math.sin(th)], linewidth=0.5)
+    safe = plt.Circle((vx,vy), safety_radius, fill=False, linestyle="--")
+    ax.add_patch(safe)
+    ax.set_aspect("equal", "box"); ax.grid(True, alpha=0.2)
     st.pyplot(fig)
-    st.metric("Nearest obstacle",f"{nearest:.2f} m")
 
-# ─────────────────────────────────────────────────────────
-# 3) Health Monitor (writes live score into session_state + HUD)
-# ─────────────────────────────────────────────────────────
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Nearest obstacle", f"{nearest:.2f} m")
+    c2.metric("Rays with hit", f"{int(np.sum(hits < r_max))}")
+    c3.metric("Brake/avoid", "YES" if brake else "NO")
+
+# ============ 3) Health Monitor ============
 with tab3:
     st.subheader("Predictive Maintenance (toy)")
 
-    c=st.columns(4)
-    hours=c[0].number_input("Flight hours",0.0,5000.0,820.0,step=10.0, key="hm_hours")
-    cycles=c[1].number_input("Charge cycles",0.0,6000.0,950.0,step=10.0, key="hm_cycles")
-    temp  =c[2].number_input("Max pack temp (°C)",0.0,120.0,68.0,step=1.0, key="hm_temp")
-    vib   =c[3].number_input("Vibration gRMS",0.0,5.0,0.7,step=0.1, key="hm_vib")
+    # Unique keys so nothing collides with other tabs
+    if compact:
+        hours = st.number_input("Flight hours", 0.0, 5000.0, 820.0, step=10.0, key="hm_hours")
+        cycles = st.number_input("Charge cycles", 0.0, 6000.0, 950.0, step=10.0, key="hm_cycles")
+        temp   = st.number_input("Max pack temp (°C)", 0.0, 120.0, 68.0, step=1.0, key="hm_temp")
+        vib    = st.number_input("Vibration gRMS", 0.0, 5.0, 0.7, step=0.1, key="hm_vib")
+    else:
+        c = st.columns(4)
+        hours = c[0].number_input("Flight hours", 0.0, 5000.0, 820.0, step=10.0, key="hm_hours")
+        cycles = c[1].number_input("Charge cycles", 0.0, 6000.0, 950.0, step=10.0, key="hm_cycles")
+        temp   = c[2].number_input("Max pack temp (°C)", 0.0, 120.0, 68.0, step=1.0, key="hm_temp")
+        vib    = c[3].number_input("Vibration gRMS", 0.0, 5.0, 0.7, step=0.1, key="hm_vib")
 
     score, penalty, excess_temp, due = compute_health(hours, cycles, temp, vib)
-    st.session_state["health_now"] = float(score)  # ← keep HUD in sync
-    sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")  # update sidebar
+
+    # Write to session for Planner + HUD
+    st.session_state["health_now"] = float(score)
+    sb_health.metric("Health", f"{st.session_state['health_now']:.1f} / 100")
 
     st.metric("Health score (now)", f"{score:,.1f} / 100")
     st.progress(int(score))
@@ -266,7 +296,6 @@ with tab3:
     fut_score, fut_penalty, fut_excess, fut_due = compute_health(
         hours + add_hours, cycles + add_cycles, temp + temp_bias, max(0.0, vib + vib_bias)
     )
-
     colA, colB = st.columns(2)
     with colA:
         st.metric("Projected score", f"{fut_score:,.1f} / 100", delta=f"{fut_score - score:+.1f}")
