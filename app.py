@@ -1,5 +1,4 @@
 # eVTOL Mini-Lab — ultra-simple demos for autonomy, perception, and maintenance
-# Author: You :)
 # Run: streamlit run app.py
 
 import math
@@ -35,6 +34,7 @@ def astar(grid: np.ndarray, start: Tuple[int,int], goal: Tuple[int,int]):
                 current = came_from[current]
                 path.append(current)
             return path[::-1]
+    # explore neighbors
         open_set.remove(current)
         for dy,dx in [(1,0),(-1,0),(0,1),(0,-1)]:
             ny, nx = current[0]+dy, current[1]+dx
@@ -64,19 +64,17 @@ def draw_grid_path(grid, path, start, goal, nfz_rects, scale_m=50, ax=None, titl
         xs = [x for y,x in path]
         ys = [y for y,x in path]
         ax.plot(xs, ys, linewidth=3)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title(title + f" (scale ~{scale_m} m per cell)")
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(title + f" (scale ~{scale_m} m/cell)")
     return ax
 
 # Simple hover+cruise energy model (toy)
 def energy_wh(distance_m, cruise_ms, mass_kg, hover_s, disk_loading_proxy=30.0, CdA=0.6, rho=1.2, eff=0.75):
-    # Hover power ~ k1 * mass^(3/2) (very rough toy) + loading factor
+    # Hover power ~ k1 * mass^(3/2) (toy) with loading factor
     k_hover = 25.0
-    P_hover = k_hover * (mass_kg ** 1.5) * (1.0 + 0.015*disk_loading_proxy)  # Watts
+    P_hover = k_hover * (mass_kg ** 1.5) * (1.0 + 0.015*disk_loading_proxy)  # W
     E_hover = P_hover * hover_s / 3600.0
-
-    # Parasitic power ~ 0.5 rho V^3 CdA / prop eff (toy)
+    # Parasitic power ~ 0.5 rho V^3 CdA / eff (toy)
     P_cruise = (0.5 * rho * (cruise_ms**3) * CdA) / max(0.3, eff)
     t_cruise = distance_m / max(1e-6, cruise_ms)
     E_cruise = P_cruise * t_cruise / 3600.0
@@ -84,7 +82,6 @@ def energy_wh(distance_m, cruise_ms, mass_kg, hover_s, disk_loading_proxy=30.0, 
 
 # “Lidar” rays for perception toy
 def lidar_scan(vehicle_xy: Tuple[float,float], obstacles: np.ndarray, r_max=20.0, num_rays=180, res=0.5):
-    """obstacles: array of shape (N,2) with XY positions in meters."""
     vx, vy = vehicle_xy
     angles = np.linspace(0, 2*np.pi, num_rays, endpoint=False)
     hits = []
@@ -94,7 +91,6 @@ def lidar_scan(vehicle_xy: Tuple[float,float], obstacles: np.ndarray, r_max=20.0
         while d <= r_max:
             x = vx + d * math.cos(th)
             y = vy + d * math.sin(th)
-            # hit if within ~0.6 m of any obstacle center
             if np.any(np.hypot(obstacles[:,0]-x, obstacles[:,1]-y) < 0.6):
                 hit = d
                 break
@@ -120,15 +116,19 @@ def draw_lidar(vehicle_xy, obs, hits, angles, r_max, safety_radius):
 
 # Health score toy model (0–100)
 def health_score(hours, cycles, max_temp_c, vib_g_rms):
-    # Normalize features and combine with simple weights
     h = clamp(100 - (hours*0.8 + cycles*0.3 + max(0, max_temp_c-40)*1.2 + vib_g_rms*8), 0, 100)
     due = h < 60 or max_temp_c > 75 or vib_g_rms > 1.2
     return h, due
 
 # ─────────────────────────────────────────────────────────
+# ONE set of tabs (fix for repeated UI)
+# ─────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])
+
+# ─────────────────────────────────────────────────────────
 # 1) City Hop Planner
 # ─────────────────────────────────────────────────────────
-with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[0]:
+with tab1:
     st.subheader("City Hop Planner (Autonomy + UTM lite)")
 
     cols = st.columns(4)
@@ -143,7 +143,6 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[0]:
     hover_time_s = cols[2].number_input("Total hover time (s)", 0.0, 300.0, 60.0, step=5.0, help="Takeoff + landing + holds")
     battery_Wh = cols[3].number_input("Usable battery (Wh)", 50000.0, 400000.0, 120000.0, step=5000.0)
 
-    # pads (y,x)
     st.markdown("**Pads (grid coords)**: (0,0) bottom-left; avoid no-fly rectangles.")
     cols = st.columns(4)
     start = (int(cols[0].number_input("Start Y", 0, grid_H-1, 5)),
@@ -198,7 +197,7 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[0]:
 # ─────────────────────────────────────────────────────────
 # 2) Perception Sandbox
 # ─────────────────────────────────────────────────────────
-with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[1]:
+with tab2:
     st.subheader("Perception Sandbox (toy lidar)")
 
     cols = st.columns(4)
@@ -207,7 +206,6 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[1]:
     r_max = cols[2].slider("Lidar range (m)", 5, 40, 20)
     safety_radius = cols[3].slider("Safety stop radius (m)", 1, 10, 5)
 
-    # Random obstacle field (seeded by UI for reproducibility)
     seed = st.slider("Random seed", 0, 999, 7)
     rng = np.random.default_rng(seed)
     obs = rng.uniform(low=-field_m/2, high=field_m/2, size=(num_obs, 2))
@@ -217,7 +215,7 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[1]:
     nearest = hits.min() if len(hits) else r_max
     brake = nearest < safety_radius
 
-    fig, ax = draw_lidar(vehicle_xy, obs, hits, ang, r_max, safety_radius)
+    fig, _ = draw_lidar(vehicle_xy, obs, hits, ang, r_max, safety_radius)
     st.pyplot(fig)
 
     c1,c2,c3 = st.columns(3)
@@ -229,7 +227,7 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[1]:
 # ─────────────────────────────────────────────────────────
 # 3) Health Monitor
 # ─────────────────────────────────────────────────────────
-with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[2]:
+with tab3:
     st.subheader("Predictive Maintenance (toy)")
 
     cols = st.columns(4)
@@ -245,9 +243,9 @@ with st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])[2]:
 
 st.divider()
 st.markdown(
-    "**How this maps to your slide:**  \n"
-    "• *Real-time autonomy*: A* route around NFZs + GO/NO-GO energy check.  \n"
+    "**Mapping to your slide:**  \n"
+    "• *Real-time autonomy*: A* route around NFZs + GO/NO-GO energy.  \n"
     "• *Perception*: 2D lidar toy → nearest-obstacle brake/avoid.  \n"
-    "• *Predictive maintenance*: quick health score from hours/cycles/temps/vibes.  \n"
-    "• *UTM/fleet mgmt*: the planner is time-free today, but you can add simple time-slots for multiple aircraft later."
+    "• *Predictive maintenance*: quick health score.  \n"
+    "• *UTM/fleet mgmt*: extend with time slots for multi-aircraft later."
 )
