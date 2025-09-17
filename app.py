@@ -1,9 +1,10 @@
-# 🛩️ eVTOL Mini-Lab — Streamlit demo (HUD + animation + normalized health + mobile-friendly)
+# 🛩️ eVTOL Mini-Lab — Streamlit demo
+# Features: Planner + Perception + Health + Fleet UTM + Logs/Export + Physics Fidelity + Copilot (heuristic by default)
 # Run: streamlit run app.py
 
-import math, time, json
+import os, math, time, json
 from datetime import datetime
-from typing import Tuple, List
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="eVTOL Mini-Lab", page_icon="🛩️", layout="wide")
 st.title("🛩️ eVTOL Mini-Lab")
-st.caption("Autonomy • Perception • Predictive Maintenance")
+st.caption("Autonomy • Perception • Predictive Maintenance • Fleet Coordination • Copilot")
 
 # ─────────────────────────────────────────────────────────
 # Helpers
@@ -45,7 +46,8 @@ def draw_grid(grid, start, goal, nfz_rects, scale_m=50, title="Grid"):
     fig, ax = plt.subplots(figsize=(5.5,5.5))
     ax.imshow(grid, cmap="Greys", origin="lower")
     for (y,x) in [start,goal]:
-        ax.scatter(x,y,s=60,marker="o" if (y,x)==start else "X")
+        if y >= 0 and x >= 0:
+            ax.scatter(x,y,s=60,marker="o" if (y,x)==start else "X")
     for (y0,x0,y1,x1) in nfz_rects:
         rect=plt.Rectangle((x0,y0),x1-x0+1,y1-y0+1,fill=True,alpha=0.2)
         ax.add_patch(rect)
@@ -54,7 +56,7 @@ def draw_grid(grid, start, goal, nfz_rects, scale_m=50, title="Grid"):
     return fig, ax
 
 def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
-    # Toy model: hover ~ mass^1.5; cruise ~ V^3 drag
+    # Simple model: hover ~ mass^1.5; cruise ~ V^3 drag
     k_hover=25.0
     P_hover=k_hover*(mass_kg**1.5)
     E_hover=P_hover*hover_s/3600.0
@@ -63,15 +65,8 @@ def energy_wh(distance_m, cruise_ms, mass_kg, hover_s):
     E_cruise=P_cruise*t_cruise/3600.0
     return E_hover+E_cruise, P_hover, P_cruise, t_cruise
 
-# ▶ Normalized health score (moves smoothly 0–100)
+# ▶ Normalized health score (0–100)
 def compute_health(hours, cycles, max_temp_c, vib_g_rms):
-    """
-    Normalized 0–100 health score.
-      hours: 0–2000 h
-      cycles: 0–2000
-      temp excess over 40°C: 0–40°C
-      vibration: 0–2.0 gRMS
-    """
     h_n = min(hours / 2000.0, 1.0)
     c_n = min(cycles / 2000.0, 1.0)
     t_excess = max(0.0, max_temp_c - 40.0)
@@ -109,37 +104,26 @@ def energy_wh_better(
     loiter_min: float = 0.0,
     loiter_mode: str = "hover"  # "hover" or "cruise"
 ):
-    """
-    Higher-fidelity toy model (still lightweight):
-    - Cruise power = parasite + induced (air power), then / efficiencies to get electrical input
-    - Hover power from momentum theory using total rotor disk area
-    - Separate TO/Landing hover times + optional loiter reserve (hover by default)
-    """
     g = 9.80665
     W = mass_kg * g
-
     # Hover power (air) via momentum theory
     P_hover_air = (W ** 1.5) / max(1e-6, (2.0 * rho * A_disk_total) ** 0.5)
     P_hover_elec = P_hover_air / max(1e-6, (eta_prop * eta_elec))
     E_hover_Wh = P_hover_elec * (hover_to_s + hover_ldg_s) / 3600.0
-
     # Cruise power (air): parasite + induced
     P_par_air = 0.5 * rho * (V_ms ** 3) * S_ref * CD0
     k = 1.0 / max(1e-6, (math.pi * e * AR))
     P_ind_air = (2.0 * k * (W ** 2)) / max(1e-6, (rho * V_ms * S_ref))
     P_cruise_air = P_par_air + P_ind_air
     P_cruise_elec = P_cruise_air / max(1e-6, (eta_prop * eta_elec))
-
     # Cruise time & energy
     t_cruise_s = distance_m / max(1e-6, V_ms)
     E_cruise_Wh = P_cruise_elec * t_cruise_s / 3600.0
-
     # Loiter reserve
     if loiter_mode == "cruise":
         E_loiter_Wh = P_cruise_elec * (loiter_min * 60.0) / 3600.0
     else:
         E_loiter_Wh = P_hover_elec * (loiter_min * 60.0) / 3600.0
-
     E_total_Wh = E_hover_Wh + E_cruise_Wh + E_loiter_Wh
     return E_total_Wh, P_hover_elec, P_cruise_elec, t_cruise_s, E_hover_Wh, E_cruise_Wh, E_loiter_Wh
 
@@ -179,7 +163,6 @@ st.sidebar.subheader("Logging")
 st.sidebar.caption("Automatically record planner runs & ratings")
 st.session_state.setdefault("log_auto_flight", True)
 st.session_state.setdefault("log_auto_rating", True)
-
 st.session_state["log_auto_flight"] = st.sidebar.toggle(
     "Auto-log flight runs", value=st.session_state["log_auto_flight"], key="log_auto_flight_toggle"
 )
@@ -193,7 +176,10 @@ compact = st.sidebar.toggle("Compact controls (mobile)", value=True, key="ui_com
 # ─────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["City Hop Planner", "Perception Sandbox", "Health Monitor"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "City Hop Planner", "Perception Sandbox", "Health Monitor",
+    "Fleet UTM", "Copilot"
+])
 
 # ============ 1) City Hop Planner ============
 with tab1:
@@ -247,7 +233,7 @@ with tab1:
     path=astar(grid,start,goal)
     distance=((len(path)-1) if path else 0)*scale_m
 
-    # ── Physics fidelity selector ─────────────────────────
+    # Physics fidelity
     fidelity = st.selectbox(
         "Physics fidelity",
         ["Simple (demo)", "Better (induced + parasite, efficiencies)"],
@@ -262,20 +248,18 @@ with tab1:
             hover_ldg_s  = cA[1].number_input("Landing hover (s)", 0.0, 600.0, 45.0, 5.0, key="plan_ldg_hover")
             loiter_min   = cA[2].number_input("Loiter reserve (min)", 0.0, 30.0, 3.0, 1.0, key="plan_loiter_min")
             loiter_mode  = cA[3].selectbox("Loiter mode", ["hover", "cruise"], index=0, key="plan_loiter_mode")
-
             cB = st.columns(4)
             rho        = cB[0].number_input("Air density ρ (kg/m³)", 0.8, 1.6, 1.225, 0.005, key="plan_rho")
             S_ref      = cB[1].number_input("Ref area S (m²)", 0.5, 20.0, 3.5, 0.1, key="plan_S")
             CD0        = cB[2].number_input("CD₀ (parasite)", 0.02, 0.30, 0.08, 0.005, key="plan_CD0")
             A_disk_tot = cB[3].number_input("Rotor disk area ΣA (m²)", 2.0, 150.0, 20.0, 0.5, key="plan_Adisk")
-
             cC = st.columns(4)
             AR    = cC[0].number_input("Aspect ratio AR", 3.0, 20.0, 8.0, 0.5, key="plan_AR")
             e     = cC[1].number_input("Oswald e", 0.5, 1.0, 0.80, 0.01, key="plan_e")
             eta_p = cC[2].number_input("Prop eff ηₚ", 0.5, 0.95, 0.75, 0.01, key="plan_eta_p")
             eta_e = cC[3].number_input("Elec eff ηₑ", 0.5, 0.99, 0.93, 0.01, key="plan_eta_e")
 
-    # ── Energy & GO check (fidelity-aware) ─────────────────
+    # Energy & GO (fidelity-aware)
     if fidelity.startswith("Better"):
         E_need, P_h, P_c, t_c, E_hover_Wh, E_cruise_Wh, E_loiter_Wh = energy_wh_better(
             distance_m=distance,
@@ -288,14 +272,14 @@ with tab1:
             eta_prop=eta_p, eta_elec=eta_e,
             loiter_min=loiter_min, loiter_mode=loiter_mode
         )
-        reserve=(reserve_pct/100.0)*batt  # same policy: percent of battery capacity
+        reserve=(reserve_pct/100.0)*batt
     else:
         E_need,P_h,P_c,t_c=energy_wh(distance,cruise,mass,hover_s)
         reserve=(reserve_pct/100.0)*batt
 
     go=(path is not None) and (E_need + reserve <= batt)
 
-    # Auto snapshot of planning context (non-intrusive)
+    # Auto snapshot of planning context
     if st.session_state.get("log_auto_flight", True):
         log_event(
             "plan_snapshot",
@@ -325,7 +309,7 @@ with tab1:
     st.info(f"Need: {E_need:,.0f} Wh | Battery: {batt:,.0f} Wh | Reserve: {reserve:,.0f} Wh")
     st.success("GO ✅") if go else st.error("NO-GO ❌")
 
-    # Manual snapshot button
+    # Manual snapshot
     if st.button("📝 Log plan snapshot", key="plan_log"):
         log_event(
             "plan_snapshot_manual",
@@ -560,6 +544,235 @@ with tab3:
         )
         st.success("Logged projected health.")
 
+# ============ 4) Fleet UTM (multi-vehicle coordination) ============
+with tab4:
+    st.subheader("Fleet UTM (multi-vehicle, adaptive coordination)")
+
+    # Grid + NFZ
+    fW = st.slider("Grid width", 20, 60, 40, key="utm_w")
+    fH = st.slider("Grid height", 20, 60, 40, key="utm_h")
+    fScale = st.selectbox("Meters/cell", [25, 50, 75, 100], index=1, key="utm_scale")
+
+    nfz_rects_f = []
+    nfz_n = st.slider("No-Fly Zones", 0, 3, 1, key="utm_nfz_n")
+    for i in range(nfz_n):
+        with st.expander(f"NFZ #{i+1}", expanded=False):
+            c = st.columns(4)
+            y0 = c[0].number_input("y0", 0, fH-1, 10, key=f"utm_nfz_y0_{i}")
+            x0 = c[1].number_input("x0", 0, fW-1, 10, key=f"utm_nfz_x0_{i}")
+            y1 = c[2].number_input("y1", 0, fH-1, 15, key=f"utm_nfz_y1_{i}")
+            x1 = c[3].number_input("x1", 0, fW-1, 15, key=f"utm_nfz_x1_{i}")
+            y0, y1 = sorted([y0, y1]); x0, x1 = sorted([x0, x1])
+            nfz_rects_f.append((y0, x0, y1, x1))
+
+    gridF = np.zeros((fH, fW), dtype=int)
+    for (y0,x0,y1,x1) in nfz_rects_f: gridF[y0:y1+1, x0:x1+1] = 1
+
+    # Fleet + policy
+    cols = st.columns(4)
+    N = cols[0].slider("Vehicles", 2, 10, 5, key="utm_N")
+    base_speed = cols[1].selectbox("Base speed (cells/step)", [1, 2], index=0, key="utm_speed")
+    adaptive = cols[2].toggle("Adaptive coordination", value=True, key="utm_adapt")
+    steps_max = cols[3].slider("Max steps", 50, 500, 180, key="utm_steps")
+
+    st.markdown("**Sensor Fusion Confidence (toy: lidar/radar/camera fusion)**")
+    c = st.columns(3)
+    conf_lidar = c[0].slider("Lidar conf", 0.0, 1.0, 0.9, 0.01, key="utm_conf_l")
+    conf_radar = c[1].slider("Radar conf", 0.0, 1.0, 0.8, 0.01, key="utm_conf_r")
+    conf_cam   = c[2].slider("Camera conf", 0.0, 1.0, 0.7, 0.01, key="utm_conf_c")
+    fusion_conf = float(np.clip(0.5*conf_lidar + 0.3*conf_radar + 0.2*conf_cam, 0.0, 1.0))
+
+    health_now = float(st.session_state.get("health_now", 80.0)) / 100.0
+
+    seed = st.slider("Random seed", 0, 999, 11, key="utm_seed")
+    rng = np.random.default_rng(seed)
+    free = np.argwhere(gridF == 0)
+    if len(free) < 2*N:
+        st.error("Not enough free cells for starts/goals — reduce NFZs or increase grid size.")
+        st.stop()
+    rng.shuffle(free)
+    starts = [tuple(map(int, free[i])) for i in range(N)]
+    goals  = [tuple(map(int, free[-(i+1)])) for i in range(N)]
+
+    sep_base = 1
+    sep = sep_base + (0 if not adaptive else int(np.interp(1 - min(fusion_conf, health_now), [0,1], [0,2])))
+    lam_conflict = 10.0 if not adaptive else float(np.interp(1 - fusion_conf, [0,1], [4.0, 18.0]))
+    lam_delay    = 0.1 if not adaptive else float(np.interp(health_now, [0,1], [0.25, 0.05]))
+    lam_nfz      = 50.0
+
+    def cell_free(y,x): return 0 <= y < fH and 0 <= x < fW and gridF[y,x]==0
+    def neighbors(y,x):
+        for dy,dx in [(1,0),(-1,0),(0,1),(0,-1)]:
+            ny,nx = y+dy, x+dx
+            if cell_free(ny,nx): yield (ny,nx)
+
+    def next_step(pos, others, goal):
+        def manh(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
+        best, best_cost = pos, 1e9
+        for ny, nx in list(neighbors(*pos)) + [pos]:
+            conflict = sum(1 for o in others if (abs(o[0]-ny)+abs(o[1]-nx)) <= sep and o != pos)
+            nfz_cross = 0 if gridF[ny,nx]==0 else 1
+            cost = manh((ny,nx), goal) + lam_conflict*conflict + lam_nfz*nfz_cross + lam_delay
+            if cost < best_cost: best, best_cost = (ny,nx), cost
+        return best
+
+    run = st.button("Run simulation", key="utm_run")
+    plot_ph = st.empty(); metrics_ph = st.empty()
+    positions = starts[:]; reached = np.zeros(N, dtype=bool); los_viol = 0
+
+    if run:
+        log_event("fleet_sim_started", N=int(N), sep=int(sep), adaptive=bool(adaptive),
+                  fusion_conf=float(fusion_conf), health=float(health_now))
+
+        for t in range(steps_max):
+            new_pos=[]
+            for i,p in enumerate(positions):
+                if reached[i]: new_pos.append(p); continue
+                others = positions[:i] + positions[i+1:]
+                step = p
+                for _ in range(base_speed):  # multi-cells per step
+                    step = next_step(step, others, goals[i])
+                new_pos.append(step)
+                if step == goals[i]: reached[i]=True
+            positions = new_pos
+
+            for i in range(N):
+                for j in range(i+1, N):
+                    if (abs(positions[i][0]-positions[j][0]) + abs(positions[i][1]-positions[j][1])) < sep:
+                        los_viol += 1
+
+            fig, ax = draw_grid(gridF, (-1,-1), (-1,-1), nfz_rects_f, fScale, title="Fleet UTM")
+            xs=[x for y,x in positions]; ys=[y for y,x in positions]
+            gx=[x for y,x in goals]; gy=[y for y,x in goals]
+            ax.scatter(xs, ys, s=60); ax.scatter(gx, gy, marker="X", s=70)
+            plot_ph.pyplot(fig)
+
+            eta_cells = np.mean([abs(p[0]-g[0]) + abs(p[1]-g[1]) for p,g in zip(positions, goals)])
+            done = int(np.sum(reached))
+            metrics_ph.write(
+                f"Step {t+1}/{steps_max} | Reached {done}/{N} | Mean remaining {eta_cells:.1f} cells | "
+                f"Sep buffer {sep} | LOS violations {los_viol}"
+            )
+            if done == N: break
+
+        log_event("fleet_sim_completed", N=int(N), sep=int(sep), adaptive=bool(adaptive),
+                  fusion_conf=float(fusion_conf), health=float(health_now),
+                  los_violations=int(los_viol), reached=int(np.sum(reached)))
+        st.success("Simulation finished ✅")
+        st.caption("Tip: open **📜 Logs & Export** below to download results.")
+
+# ============ 5) Copilot (heuristic by default; optional cloud LLM) ============
+with tab5:
+    st.subheader("Copilot (log-aware helper)")
+    st.caption("Default: local heuristic (no network). Optionally enable a cloud LLM with an API key.")
+
+    # Controls
+    enable_cloud_llm = st.toggle("Enable cloud LLM (optional)", value=False, help="Off = local heuristic only")
+    api_key_input = ""
+    if enable_cloud_llm:
+        api_key_input = st.text_input("OpenAI API key", type="password", help="Or set OPENAI_API_KEY env var")
+    api_key_env = os.getenv("OPENAI_API_KEY", "") if enable_cloud_llm else ""
+    api_key = (api_key_input.strip() or api_key_env) if enable_cloud_llm else ""
+
+    # Chat history
+    st.session_state.setdefault("chat_msgs", [])
+    for role, content in st.session_state["chat_msgs"]:
+        with st.chat_message(role):
+            st.write(content)
+
+    user_msg = st.chat_input("Ask: 'Why NO-GO?', 'Summarize', 'Fleet results?'")
+    if user_msg:
+        st.session_state["chat_msgs"].append(("user", user_msg))
+        with st.chat_message("user"): st.write(user_msg)
+
+        # Context from latest logs
+        df_logs = logs_dataframe()
+        last_plan  = df_logs[df_logs["event"].str.contains("plan_snapshot")].tail(1).to_dict("records")
+        last_rate  = df_logs[df_logs["event"]=="mission_rating"].tail(1).to_dict("records")
+        last_fleet = df_logs[df_logs["event"]=="fleet_sim_completed"].tail(1).to_dict("records")
+        context = {
+            "last_plan":  last_plan[0] if last_plan else {},
+            "last_rating":last_rate[0] if last_rate else {},
+            "last_fleet": last_fleet[0] if last_fleet else {},
+        }
+
+        reply = None
+        mode = "heuristic"
+
+        # Optional cloud LLM
+        if enable_cloud_llm and api_key:
+            try:
+                import requests
+                prompt = (
+                    "You are a concise aerospace copilot. Use the JSON context to answer.\n"
+                    f"User: {user_msg}\n\n"
+                    f"Context JSON:\n{json.dumps(context, indent=2)}\n\n"
+                    "Answer in 1-4 short bullets. If data is missing, say what to run in the app to produce it."
+                )
+                res = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type":"application/json"},
+                    json={"model": "gpt-4o-mini", "messages":[{"role":"user","content":prompt}], "temperature":0.2},
+                    timeout=20
+                )
+                data = res.json()
+                reply = data["choices"][0]["message"]["content"].strip()
+                mode = "openai"
+            except Exception:
+                reply = None
+                mode = "heuristic"
+
+        # Heuristic fallback / default
+        if not reply:
+            lines = []
+            q = user_msg.lower()
+            p = context["last_plan"]; r = context["last_rating"]; f = context["last_fleet"]
+
+            def have_plan(): return bool(p)
+            def have_fleet(): return bool(f)
+            def have_rating(): return bool(r)
+
+            if "summary" in q or "summarize" in q:
+                if have_plan():
+                    try:
+                        lines.append(
+                            f"• Plan: {p.get('distance_m',0):.0f} m, Need {p.get('energy_need_Wh',0):.0f} Wh, "
+                            f"Reserve {p.get('reserve_Wh',0):.0f} Wh → GO={p.get('go')}"
+                        )
+                    except Exception:
+                        lines.append("• Plan: summary available (some fields missing).")
+                if have_rating():
+                    lines.append(f"• Mission rating: {r.get('rating')} (Health {r.get('health')})")
+                if have_fleet():
+                    lines.append(f"• Fleet: N={f.get('N')}, LOS={f.get('los_violations')}, Reached={f.get('reached')}")
+                if not lines:
+                    lines.append("• No recent logs. Run a plan/flight or fleet sim, then ask again.")
+            elif "why no-go" in q or "no-go" in q:
+                if have_plan():
+                    need, reserve, batt = p.get("energy_need_Wh"), p.get("reserve_Wh"), p.get("battery_Wh")
+                    if None not in (need, reserve, batt) and (need + reserve) > batt:
+                        lines.append("• Need + Reserve > Battery. Reduce reserve %, distance, mass, hover, or increase battery.")
+                    else:
+                        lines.append("• Last snapshot doesn't show NO-GO. Re-run planner and snapshot again.")
+                else:
+                    lines.append("• No plan snapshot found. Run a plan and click Log snapshot.")
+            elif "fleet" in q or "los" in q or "coordination" in q:
+                if have_fleet():
+                    lines.append(f"• Last fleet run: N={f.get('N')}, LOS={f.get('los_violations')}, "
+                                 f"Adaptive={f.get('adaptive')}, Sep={f.get('sep')}")
+                    lines.append("• Tip: raise fusion confidence or separation; enable Adaptive to reduce LOS.")
+                else:
+                    lines.append("• No fleet run logged yet. Open Fleet UTM → Run simulation → ask again.")
+            else:
+                lines.append("• Try: 'Summarize', 'Why NO-GO?', or 'Fleet results?'.")
+                lines.append("• You can also ask about health, reserves, or energy drivers.")
+            reply = "\n".join(lines)
+
+        with st.chat_message("assistant"):
+            st.write(reply)
+        st.session_state["chat_msgs"].append(("assistant", reply))
+        log_event("copilot_exchange", mode=mode, question=user_msg, answer=reply)
+
 # ─────────────────────────────────────────────────────────
 # 📜 Logs & Export
 # ─────────────────────────────────────────────────────────
@@ -567,13 +780,9 @@ with st.expander("📜 Logs & Export", expanded=False):
     df = logs_dataframe()
     st.caption(f"{len(df)} events recorded")
     if len(df):
-        st.dataframe(df, use_container_width=True, height=240)
-
-        # CSV / JSON strings
+        st.dataframe(df, use_container_width=True, height=260)
         csv_str = df.to_csv(index=False)
         json_str = json.dumps(st.session_state["logs"], indent=2)
-
-        # Downloads
         st.download_button(
             "⬇️ Download CSV",
             data=csv_str.encode("utf-8"),
@@ -588,16 +797,12 @@ with st.expander("📜 Logs & Export", expanded=False):
             mime="application/json",
             key="logs_dl_json",
         )
-
-        # Copy-ready blocks (click the copy icon)
         st.markdown("**Copy to clipboard → JSON**")
         st.code(json_str, language="json")
         st.markdown("**Copy to clipboard → CSV**")
         st.code(csv_str, language="csv")
-
-        # Clear
         if st.button("🗑️ Clear all logs", key="logs_clear"):
             st.session_state["logs"] = []
             st.rerun()
     else:
-        st.info("No events yet. Use the snapshot buttons above, or run a flight.")
+        st.info("No events yet. Use the snapshot buttons above, or run a flight / fleet sim.")
