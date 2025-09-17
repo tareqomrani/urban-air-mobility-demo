@@ -1,3 +1,6 @@
-streamlit>=1.36
-numpy>=1.25
-matplotlib>=3.8
+streamlit
+matplotlib
+numpy
+pandas
+# optional for cloud LLM:
+# requests
