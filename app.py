@@ -1,3 +1,4 @@
+![Urban Air Mobility Demo](./banner.PNG)
 # 🛩️ eVTOL Mini-Lab — Streamlit demo
 # Features: Planner + Perception + Health + Fleet UTM + Logs/Export + Physics Fidelity + Copilot (heuristic by default)
 # Run: streamlit run app.py
